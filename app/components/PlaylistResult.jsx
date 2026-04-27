@@ -1,11 +1,51 @@
 'use client';
 
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, Component } from 'react';
 import { encodePlaylist } from '../lib/share';
 
+// React class component error boundary so a render crash doesn't blank the page.
+class PlaylistErrorBoundary extends Component {
+  constructor(props) {
+    super(props);
+    this.state = { hasError: false, error: null };
+  }
+  static getDerivedStateFromError(error) {
+    return { hasError: true, error };
+  }
+  componentDidCatch(error, info) {
+    console.error('PlaylistResult crashed:', error, info);
+  }
+  render() {
+    if (this.state.hasError) {
+      return (
+        <div style={{ padding: 24, border: '1px solid #e85d4f55', borderRadius: 8, marginTop: 40 }}>
+          <div style={{ fontFamily: '"Fraunces", Georgia, serif', fontSize: 24, fontStyle: 'italic', color: '#e85d4f' }}>
+            Something went sideways while rendering this playlist.
+          </div>
+          <pre style={{ marginTop: 12, fontFamily: 'monospace', fontSize: 12, color: '#c8bfb1', whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>
+            {String(this.state.error?.message || this.state.error || 'Unknown error')}
+          </pre>
+          <div style={{ marginTop: 16, fontSize: 14, color: '#8a7f72' }}>
+            Try a different mood or refresh the page. If this keeps happening, screenshot this and send it back to debug.
+          </div>
+        </div>
+      );
+    }
+    return this.props.children;
+  }
+}
+
 export default function PlaylistResult({ result, isShared = false }) {
+  return (
+    <PlaylistErrorBoundary>
+      <PlaylistInner result={result} isShared={isShared} />
+    </PlaylistErrorBoundary>
+  );
+}
+
+function PlaylistInner({ result, isShared }) {
   const [playingIndex, setPlayingIndex] = useState(null);
-  const [shareState, setShareState] = useState('idle'); // idle | copied
+  const [shareState, setShareState] = useState('idle');
   const audioRef = useRef(null);
 
   useEffect(() => {
@@ -32,20 +72,26 @@ export default function PlaylistResult({ result, isShared = false }) {
   }
 
   async function handleShare() {
-    const id = encodePlaylist(result);
-    const url = `${window.location.origin}/p/${id}`;
+    let url;
+    try {
+      const id = encodePlaylist(result);
+      url = `${window.location.origin}/p/${id}`;
+    } catch (err) {
+      console.error('Encode failed:', err);
+      window.alert('Could not generate share link.');
+      return;
+    }
 
-    // Use the native share sheet on mobile if available, otherwise copy to clipboard.
-    if (navigator.share) {
+    if (typeof navigator !== 'undefined' && navigator.share) {
       try {
         await navigator.share({
-          title: result.playlist_title,
-          text: result.vibe_description,
+          title: safeStr(result.playlist_title) || 'A playlist',
+          text: safeStr(result.vibe_description) || '',
           url,
         });
         return;
       } catch {
-        // User cancelled or share failed; fall through to clipboard.
+        // Fall through to clipboard.
       }
     }
     try {
@@ -53,10 +99,19 @@ export default function PlaylistResult({ result, isShared = false }) {
       setShareState('copied');
       setTimeout(() => setShareState('idle'), 2000);
     } catch {
-      // Clipboard failed; show URL inline as a fallback.
       window.prompt('Copy this link:', url);
     }
   }
+
+  // Coerce inputs to render-safe shapes. Anything that's not what we expect becomes a safe default.
+  const playlistTitle = safeStr(result?.playlist_title) || 'Untitled playlist';
+  const vibeDescription = safeStr(result?.vibe_description);
+  const songs = Array.isArray(result?.songs)
+    ? result.songs.filter(s => s && typeof s === 'object')
+    : [];
+  const similarArtists = Array.isArray(result?.similar_artists)
+    ? result.similar_artists.filter(a => a && typeof a === 'object')
+    : [];
 
   const display = { fontFamily: '"Fraunces", Georgia, serif' };
   const mono = { fontFamily: '"JetBrains Mono", monospace' };
@@ -95,36 +150,37 @@ export default function PlaylistResult({ result, isShared = false }) {
       </div>
 
       <h2 style={{ ...display, fontSize: 'clamp(40px, 6vw, 64px)', fontStyle: 'italic', fontWeight: 700, lineHeight: 1, margin: 0, letterSpacing: '-0.02em' }}>
-        {result.playlist_title}
+        {playlistTitle}
       </h2>
-      <p style={{ marginTop: 16, fontSize: 16, lineHeight: 1.6, color: soft, maxWidth: 560 }}>
-        {result.vibe_description}
-      </p>
+      {vibeDescription && (
+        <p style={{ marginTop: 16, fontSize: 16, lineHeight: 1.6, color: soft, maxWidth: 560 }}>
+          {vibeDescription}
+        </p>
+      )}
 
       <div style={{ marginTop: 40 }}>
-        {result.songs?.map((song, i) => (
+        {songs.map((song, i) => (
           <SongRow
             key={i}
             song={song}
             index={i}
             isPlaying={playingIndex === i}
-            onTogglePlay={() => togglePreview(i, song.spotify?.preview_url)}
+            onTogglePlay={() => togglePreview(i, song?.spotify?.preview_url)}
             display={display}
             mono={mono}
             cream={cream}
             ember={ember}
             muted={muted}
             soft={soft}
-            ink={ink}
           />
         ))}
       </div>
 
-      {result.similar_artists?.length > 0 && (
+      {similarArtists.length > 0 && (
         <div style={{ marginTop: 64 }}>
           <div style={{ ...mono, fontSize: 11, letterSpacing: '0.3em', color: ember, marginBottom: 24 }}>── also dig ──</div>
           <div style={{ display: 'grid', gap: 24 }}>
-            {result.similar_artists.map((a, i) => (
+            {similarArtists.map((a, i) => (
               <ArtistRow key={i} artist={a} display={display} mono={mono} cream={cream} ember={ember} muted={muted} soft={soft} />
             ))}
           </div>
@@ -153,9 +209,20 @@ export default function PlaylistResult({ result, isShared = false }) {
   );
 }
 
-function SongRow({ song, index, isPlaying, onTogglePlay, display, mono, cream, ember, muted, soft, ink }) {
-  const hasPreview = !!song.spotify?.preview_url;
-  const albumArt = song.spotify?.album_image;
+function safeStr(value) {
+  if (value === null || value === undefined) return '';
+  if (typeof value === 'string') return value;
+  if (typeof value === 'number' || typeof value === 'boolean') return String(value);
+  return '';
+}
+
+function SongRow({ song, index, isPlaying, onTogglePlay, display, mono, cream, ember, muted, soft }) {
+  const title = safeStr(song?.title) || 'Untitled';
+  const artist = safeStr(song?.artist) || 'Unknown artist';
+  const note = safeStr(song?.note);
+  const hasPreview = !!song?.spotify?.preview_url;
+  const albumArt = safeStr(song?.spotify?.album_image);
+  const spotifyUrl = safeStr(song?.spotify?.spotify_url);
 
   return (
     <div className="song-row" style={{
@@ -217,26 +284,26 @@ function SongRow({ song, index, isPlaying, onTogglePlay, display, mono, cream, e
 
       <div>
         <div style={{ ...display, fontSize: 22, fontWeight: 700, lineHeight: 1.2 }}>
-          {song.title}
+          {title}
         </div>
         <div style={{ ...mono, fontSize: 11, letterSpacing: '0.15em', textTransform: 'uppercase', color: muted, marginTop: 4 }}>
-          {song.artist}
+          {artist}
         </div>
-        {song.note && (
+        {note && (
           <div style={{ marginTop: 8, fontSize: 14, lineHeight: 1.5, color: soft, maxWidth: 540 }}>
-            {song.note}
+            {note}
           </div>
         )}
         <div style={{ marginTop: 10, display: 'flex', gap: 16, alignItems: 'center', ...mono, fontSize: 10, letterSpacing: '0.15em', textTransform: 'uppercase' }}>
-          {song.spotify?.spotify_url && (
-            <a href={song.spotify.spotify_url} target="_blank" rel="noopener noreferrer" className="spotify-link">
+          {spotifyUrl && (
+            <a href={spotifyUrl} target="_blank" rel="noopener noreferrer" className="spotify-link">
               open in spotify ↗
             </a>
           )}
-          {!hasPreview && song.spotify?.spotify_url && (
+          {!hasPreview && spotifyUrl && (
             <span style={{ color: `${muted}88` }}>no preview available</span>
           )}
-          {!song.spotify && (
+          {!song?.spotify && (
             <span style={{ color: `${muted}88` }}>not found on spotify</span>
           )}
         </div>
@@ -246,7 +313,10 @@ function SongRow({ song, index, isPlaying, onTogglePlay, display, mono, cream, e
 }
 
 function ArtistRow({ artist, display, mono, cream, ember, muted, soft }) {
-  const image = artist.spotify?.image;
+  const name = safeStr(artist?.name) || 'Unknown';
+  const reason = safeStr(artist?.reason);
+  const image = safeStr(artist?.spotify?.image);
+  const spotifyUrl = safeStr(artist?.spotify?.spotify_url);
   return (
     <div style={{
       display: 'grid',
@@ -264,19 +334,21 @@ function ArtistRow({ artist, display, mono, cream, ember, muted, soft }) {
           display: 'flex', alignItems: 'center', justifyContent: 'center',
           ...display, fontSize: 24, fontStyle: 'italic', color: muted
         }}>
-          {artist.name.charAt(0)}
+          {name.charAt(0) || '?'}
         </div>
       )}
       <div>
         <div style={{ ...display, fontSize: 24, fontWeight: 700, fontStyle: 'italic' }}>
-          {artist.name}
+          {name}
         </div>
-        <div style={{ marginTop: 4, fontSize: 14, lineHeight: 1.5, color: soft }}>
-          {artist.reason}
-        </div>
-        {artist.spotify?.spotify_url && (
+        {reason && (
+          <div style={{ marginTop: 4, fontSize: 14, lineHeight: 1.5, color: soft }}>
+            {reason}
+          </div>
+        )}
+        {spotifyUrl && (
           <a
-            href={artist.spotify.spotify_url}
+            href={spotifyUrl}
             target="_blank"
             rel="noopener noreferrer"
             className="spotify-link"
